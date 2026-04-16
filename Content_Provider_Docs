@@ -1,0 +1,278 @@
+# Content Provider trong Android - Hướng dẫn triển khai đầy đủ
+
+## 1. Khai báo Permission và Provider trong AndroidManifest.xml
+
+### 1.1 Trong app cung cấp dữ liệu (Provider App)
+
+```xml
+<!-- Custom Permissions -->
+<permission
+    android:name="com.minhdk.provider.permission.READ_DATA"
+    android:protectionLevel="normal" />
+
+<permission
+    android:name="com.minhdk.provider.permission.WRITE_DATA"
+    android:protectionLevel="normal" />
+
+<!-- Content Provider Declaration -->
+<provider
+    android:name=".provider.MediaItemProvider"
+    android:authorities="com.minhdk.provider.media.provider"
+    android:exported="true"
+    android:readPermission="com.minhdk.provider.permission.READ_DATA"
+    android:writePermission="com.minhdk.provider.permission.WRITE_DATA" />
+
+1.2 Trong app truy xuất dữ liệu (Client App)
+
+<!-- Sử dụng quyền -->
+<uses-permission android:name="com.minhdk.provider.permission.READ_DATA" />
+<uses-permission android:name="com.minhdk.provider.permission.WRITE_DATA" />
+
+<!-- Queries (bắt buộc từ Android 11+) -->
+<queries>
+    <provider android:authorities="com.minhdk.provider.media.provider" />
+</queries>
+
+----------Chú thích----------
+Quyền custom (protectionLevel):
+
+normal: Quyền không nguy hiểm, người dùng không cần cấp.
+dangerous: Quyền nhạy cảm, người dùng phải cấp thủ công.
+signature: Chỉ app cùng chữ ký (cùng developer) mới được sử dụng.
+
+Các thuộc tính của <provider>:
+
+authorities: Định danh duy nhất của Content Provider.
+exported="true": Cho phép các app khác truy cập (bắt buộc khai báo từ Android 12 trở lên).
+readPermission: Quyền bắt buộc để gọi query().
+writePermission: Quyền bắt buộc để gọi insert(), update(), delete().
+
+
+2. Triển khai
+2.1 Trong app cung cấp dữ liệu:
+2.1.1 MediaItemProvider
+
+class MediaItemProvider : ContentProvider() {
+
+    companion object {
+        const val AUTHORITY = "com.minhdk.provider.media.provider"
+        const val TABLE_NAME = "media"
+        val CONTENT_URI: Uri = Uri.parse("content://$AUTHORITY/$TABLE_NAME")
+
+        const val CODE_MEDIA = 1
+        const val CODE_MEDIA_ID = 2
+
+        val uriMatcher = UriMatcher(UriMatcher.NO_MATCH).apply {
+            addURI(AUTHORITY, TABLE_NAME, CODE_MEDIA)
+            addURI(AUTHORITY, "$TABLE_NAME/#", CODE_MEDIA_ID)
+        }
+    }
+
+    private lateinit var database: MediaDatabase
+
+    override fun onCreate(): Boolean {
+        Log.d("minhdk", "MediaItemProvider onCreate called")
+        database = MediaDatabase(context!!.applicationContext)
+        return true
+    }
+
+    override fun query(
+        uri: Uri,
+        projection: Array<out String?>?,
+        selection: String?,
+        selectionArgs: Array<out String?>?,
+        sortOrder: String?
+    ): Cursor? {
+        return when (uriMatcher.match(uri)) {
+            CODE_MEDIA -> database.readableDatabase.query(
+                TABLE_NAME, projection, selection, selectionArgs, null, null, sortOrder
+            )
+
+            CODE_MEDIA_ID -> {
+                val id = uri.lastPathSegment
+                database.readableDatabase.query(
+                    TABLE_NAME,
+                    projection,
+                    "_id = ?",
+                    arrayOf(id),
+                    null,
+                    null,
+                    sortOrder
+                )
+            }
+
+            else -> throw IllegalArgumentException("Unknown URI: $uri")
+        }
+    }
+
+    override fun insert(uri: Uri, values: ContentValues?): Uri {
+        val id = database.writableDatabase.insert(TABLE_NAME, null, values)
+        if (id > 0) {
+            val newUri = ContentUris.withAppendedId(CONTENT_URI, id)
+            context?.contentResolver?.notifyChange(newUri, null)
+            return newUri
+        }
+        throw SQLException("Failed to insert row into $uri")
+    }
+
+    override fun update(
+        uri: Uri,
+        values: ContentValues?,
+        selection: String?,
+        selectionArgs: Array<out String?>?
+    ): Int {
+        val count = when (uriMatcher.match(uri)) {
+            CODE_MEDIA -> database.writableDatabase.update(TABLE_NAME, values, selection, selectionArgs)
+            CODE_MEDIA_ID -> {
+                val id = uri.lastPathSegment
+                database.writableDatabase.update(TABLE_NAME, values, "_id = ?", arrayOf(id))
+            }
+            else -> throw IllegalArgumentException("Unknown URI: $uri")
+        }
+
+        if (count > 0) {
+            context?.contentResolver?.notifyChange(uri, null)
+        }
+        return count
+    }
+
+    override fun delete(
+        uri: Uri,
+        selection: String?,
+        selectionArgs: Array<out String?>?
+    ): Int {
+        val count = when (uriMatcher.match(uri)) {
+            CODE_MEDIA -> database.writableDatabase.delete(TABLE_NAME, selection, selectionArgs)
+            CODE_MEDIA_ID -> {
+                val id = uri.lastPathSegment
+                database.writableDatabase.delete(TABLE_NAME, "_id = ?", arrayOf(id))
+            }
+            else -> throw IllegalArgumentException("Unknown URI: $uri")
+        }
+
+        if (count > 0) {
+            context?.contentResolver?.notifyChange(uri, null)
+        }
+        return count
+    }
+
+    override fun getType(uri: Uri): String? {
+        return when (uriMatcher.match(uri)) {
+            CODE_MEDIA -> "vnd.android.cursor.dir/vnd.$AUTHORITY.media"
+            CODE_MEDIA_ID -> "vnd.android.cursor.item/vnd.$AUTHORITY.media"
+            else -> null
+        }
+    }
+}
+
+2.1.2 MediaDatabase 
+
+class MediaDatabase(context: Context) :
+    SQLiteOpenHelper(context, "media.db", null, 1) {
+
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE media (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                childId INTEGER,
+                title TEXT,
+                imageUrl TEXT,
+                contentUrl TEXT,
+                type TEXT
+            )
+            """.trimIndent()
+        )
+
+        // insertInitialData(db) // Bỏ comment nếu muốn insert dữ liệu mẫu
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        db.execSQL("DROP TABLE IF EXISTS media")
+        onCreate(db)
+    }
+
+    private fun insertInitialData(db: SQLiteDatabase) {
+        val items = listOf(
+            MediaItem(0, 101, "Video 1", "img1.jpg", "url1.mp4", "VIDEO"),
+            MediaItem(0, 102, "Audio 1", "img2.jpg", "url2.mp3", "AUDIO"),
+            MediaItem(0, 103, "Video 2", "img3.jpg", "url3.mp4", "VIDEO"),
+            MediaItem(0, 104, "Audio 2", "img4.jpg", "url4.mp3", "AUDIO")
+        )
+
+        items.forEach { item ->
+            val values = ContentValues().apply {
+                put("childId", item.childId)
+                put("title", item.title)
+                put("imageUrl", item.imageUrl)
+                put("contentUrl", item.contentUrl)
+                put("type", item.type)
+            }
+            db.insert("media", null, values)
+        }
+
+        Log.d("minhdk", "insertInitialData completed!")
+    }
+}
+
+2.1.3 MediaItem
+
+data class MediaItem(
+    val id: Long = 0,
+    val childId: Long = 0,
+    val title: String,
+    val imageUrl: String,
+    val contentUrl: String,
+    val type: String
+)
+
+2.2 Trong app truy xuất dữ liệu:
+2.2.1 MediaItemLoader:
+
+object MediaItemLoader {
+
+    const val PROVIDER_URI = "content://com.minhdk.provider.media.provider/media"
+
+    fun loadMedia(context: Context): List<MediaItem> {
+        val list = mutableListOf<MediaItem>()
+
+        val cursor = context.contentResolver.query(
+            PROVIDER_URI.toUri(),
+            null,
+            null,
+            null,
+            null
+        )
+
+        Log.d("minhdk", "Cursor from provider: $cursor")
+
+        cursor?.use {
+            while (it.moveToNext()) {
+                list.add(
+                    MediaItem(
+                        id = it.getLong(it.getColumnIndexOrThrow("_id")),
+                        childId = it.getLong(it.getColumnIndexOrThrow("childId")),
+                        title = it.getString(it.getColumnIndexOrThrow("title")),
+                        imageUrl = it.getString(it.getColumnIndexOrThrow("imageUrl")),
+                        contentUrl = it.getString(it.getColumnIndexOrThrow("contentUrl")),
+                        type = it.getString(it.getColumnIndexOrThrow("type"))
+                    )
+                )
+            }
+        }
+
+        return list
+    }
+}
+
+2.2.2 Truy xuất dữ liệu (test)
+
+// Trong Activity hoặc Fragment
+val items = MediaItemLoader.loadMedia(this)
+
+Log.d("minhdk", "Queried Media items from provider: ${MediaItemLoader.PROVIDER_URI}")
+
+items.forEach {
+    Log.d("minhdk", "Media item: $it")
+}
+
